@@ -120,40 +120,45 @@ void ImageGrabber::GrabRGBD(const sensor_msgs::ImageConstPtr& msgRGB,const senso
   if (pose.empty())
     return;
 	
-	// transform into right handed camera frame
-   tf::Matrix3x3 rh_cameraPose( -pose.at<float>(0,0), pose.at<float>(0,1), pose.at<float>(0,2), -pose.at<float>(1,0), pose.at<float>(1,1), pose.at<float>(1,2), pose.at<float>(2,0), -pose.at<float>(2,1), -pose.at<float>(2,2));
+  // transform into right handed camera frame
+  tf::Matrix3x3 rh_cameraPose( 
+    pose.at<float>(0,0), pose.at<float>(0,1), pose.at<float>(0,2), 
+    pose.at<float>(1,0), pose.at<float>(1,1), pose.at<float>(1,2), 
+    pose.at<float>(2,0), pose.at<float>(2,1), pose.at<float>(2,2));
 
-  tf::Vector3 rh_cameraTranslation( pose.at<float>(0,3), pose.at<float>(1,3), pose.at<float>(2,3) );
+  tf::Vector3 rh_cameraTranslation( pose.at<float>(0,3),pose.at<float>(1,3), pose.at<float>(2,3) );
 
   //rotate 270deg about z and 270deg about x
   tf::Matrix3x3 rotation270degZX( 0, 0, 1,
                                  -1, 0, 0,
-                                 0, -1, 0);
+                                  0,-1, 0);
 
-  // tf::Matrix3x3 rotatePoseWorld(0, 0,-1,
-  //                                1, 0, 0,
-  //                                0,-1, 0);
-
-  tf::Matrix3x3 rotatePoseWorld( 0, 1,  0,
+  tf::Matrix3x3 rotation90degZX( 0, -1, 0,
                                  0, 0, -1,
-                                -1, 0,  0);
+                                 1, 0, 0);
 
   //publish right handed, x forward, y right, z down (NED)
   static tf::TransformBroadcaster br;
   tf::Transform transformCoordSystem = tf::Transform(rotation270degZX,tf::Vector3(0.0, 0.0, 0.0));
+  tf::Transform transformWorldSystem = tf::Transform(rotation90degZX,tf::Vector3(0.0, 0.0, 0.0));
+  br.sendTransform(tf::StampedTransform(transformCoordSystem, ros::Time::now(), "body", "camera"));
 
-  tf::Transform transformWorldSystem = tf::Transform(rotatePoseWorld,tf::Vector3(0.0, 0.0, 0.0));
-  br.sendTransform(tf::StampedTransform(transformCoordSystem, ros::Time::now(), "body", "camera_pose"));
+  tf::Transform transformCamera = tf::Transform(rh_cameraPose,rh_cameraTranslation);
+  br.sendTransform(tf::StampedTransform(transformCamera, ros::Time::now(), "camera", "pose"));
 
-  tf::Transform transformCamera = tf::Transform(rh_cameraPose, rh_cameraTranslation);
-  br.sendTransform(tf::StampedTransform(transformCamera, ros::Time::now(), "camera_pose", "pose"));
   br.sendTransform(tf::StampedTransform(transformWorldSystem, ros::Time::now(), "pose", "world"));
 
   Eigen::Matrix4f T_bc, T_cp, T_pw, T_wb;
 
   T_bc << 0, 0, 1, 0, -1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0, 1;
-  T_pw << 0, 1, 0, 0, 0, 0, -1, 0, -1, 0, 0, 0, 0, 0, 0, 1;
-  T_cp <<  -pose.at<float>(0,0), pose.at<float>(0,1), pose.at<float>(0,2), rh_cameraTranslation.getX(), -pose.at<float>(1,0), pose.at<float>(1,1), pose.at<float>(1,2), rh_cameraTranslation.getY(), pose.at<float>(2,0), -pose.at<float>(2,1), -pose.at<float>(2,2), rh_cameraTranslation.getZ(), 0, 0, 0, 1;
+  T_pw << 0,-1,0,0,
+          0,0,-1,0,
+          1,0, 0,0,
+          0,0, 0,1;
+
+  T_cp << pose.at<float>(0,0), pose.at<float>(0,1), pose.at<float>(0,2), pose.at<float>(0, 3), 
+    pose.at<float>(1,0), pose.at<float>(1,1), pose.at<float>(1,2), pose.at<float>(1, 3),
+    pose.at<float>(2,0), pose.at<float>(2,1), pose.at<float>(2,2), pose.at<float>(2, 3), 0, 0, 0, 1;
 
   T_wb = (T_bc * T_cp * T_pw).inverse();
 
