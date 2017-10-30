@@ -145,21 +145,27 @@ void ImageGrabber::GrabRGBD(const sensor_msgs::ImageConstPtr& msgRGB,const senso
   tf::Transform transformWorldSystem = tf::Transform(rotatePoseWorld,tf::Vector3(0.0, 0.0, 0.0));
   br.sendTransform(tf::StampedTransform(transformCoordSystem, ros::Time::now(), "body", "camera_pose"));
 
-  tf::Transform transformCamera = tf::Transform(rh_cameraPose,rh_cameraTranslation);
+  tf::Transform transformCamera = tf::Transform(rh_cameraPose, rh_cameraTranslation);
   br.sendTransform(tf::StampedTransform(transformCamera, ros::Time::now(), "camera_pose", "pose"));
   br.sendTransform(tf::StampedTransform(transformWorldSystem, ros::Time::now(), "pose", "world"));
+
+  Eigen::Matrix4f T_bc, T_cp, T_pw, T_wb;
+
+  T_bc << 0, 0, 1, 0, -1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0, 1;
+  T_pw << 0, 1, 0, 0, 0, 0, -1, 0, -1, 0, 0, 0, 0, 0, 0, 1;
+  T_cp <<  -pose.at<float>(0,0), pose.at<float>(0,1), pose.at<float>(0,2), rh_cameraTranslation.getX(), -pose.at<float>(1,0), pose.at<float>(1,1), pose.at<float>(1,2), rh_cameraTranslation.getY(), pose.at<float>(2,0), -pose.at<float>(2,1), -pose.at<float>(2,2), rh_cameraTranslation.getZ(), 0, 0, 0, 1;
+
+  T_wb = (T_bc * T_cp * T_pw).inverse();
 
   nav_msgs::Odometry odom;
   odom.header.stamp = ros::Time::now();
   odom.header.frame_id = "world";
-  odom.pose.pose.position.x = rh_cameraTranslation.getX();
-  odom.pose.pose.position.y = rh_cameraTranslation.getY();
-  odom.pose.pose.position.z = rh_cameraTranslation.getZ();
+  odom.pose.pose.position.x = T_wb(0, 3);
+  odom.pose.pose.position.y = T_wb(1, 3);
+  odom.pose.pose.position.z = T_wb(2, 3);
   
   Eigen::Matrix3f temp;
-  temp << - pose.at<float>(0,0),   pose.at<float>(0,1),   pose.at<float>(0,2),
-          - pose.at<float>(1,0),   pose.at<float>(1,1),   pose.at<float>(1,2),
-            pose.at<float>(2,0), - pose.at<float>(2,1), - pose.at<float>(2,2);
+  temp = T_wb.block<3, 3>(0, 0);
 
   Eigen::Quaternionf q(temp);
   odom.pose.pose.orientation.w = q.w();
