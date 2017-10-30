@@ -25,12 +25,15 @@
 #include<chrono>
 
 #include<ros/ros.h>
+#include <nav_msgs/Odometry.h>
 #include <cv_bridge/cv_bridge.h>
 #include <message_filters/subscriber.h>
 #include <message_filters/time_synchronizer.h>
 #include <message_filters/sync_policies/approximate_time.h>
-
+#include <geometry_msgs/TransformStamped.h>
 #include<opencv2/core/core.hpp>
+#include <tf/transform_datatypes.h>
+#include <tf/transform_broadcaster.h>
 
 #include"../../../include/System.h"
 
@@ -39,7 +42,12 @@ using namespace std;
 class ImageGrabber
 {
 public:
-    ImageGrabber(ORB_SLAM2::System* pSLAM):mpSLAM(pSLAM){}
+    ros::Publisher odom_pub_;
+    ros::NodeHandle nh_;
+
+    ImageGrabber(ORB_SLAM2::System* pSLAM, ros::NodeHandle & nh):mpSLAM(pSLAM), nh_(nh){
+        odom_pub_ = nh.advertise<nav_msgs::Odometry>("/orbslam/odom", 10);
+    }
 
     void GrabRGBD(const sensor_msgs::ImageConstPtr& msgRGB,const sensor_msgs::ImageConstPtr& msgD);
 
@@ -60,10 +68,8 @@ int main(int argc, char **argv)
 
     // Create SLAM system. It initializes all system threads and gets ready to process frames.
     ORB_SLAM2::System SLAM(argv[1],argv[2],ORB_SLAM2::System::RGBD,true);
-
-    ImageGrabber igb(&SLAM);
-
     ros::NodeHandle nh;
+    ImageGrabber igb(&SLAM, nh);    
 
     message_filters::Subscriber<sensor_msgs::Image> rgb_sub(nh, "/camera/rgb/image_raw", 1);
     message_filters::Subscriber<sensor_msgs::Image> depth_sub(nh, "camera/depth_registered/image_raw", 1);
@@ -86,30 +92,81 @@ int main(int argc, char **argv)
 
 void ImageGrabber::GrabRGBD(const sensor_msgs::ImageConstPtr& msgRGB,const sensor_msgs::ImageConstPtr& msgD)
 {
-    // Copy the ros image message to cv::Mat.
-    cv_bridge::CvImageConstPtr cv_ptrRGB;
-    try
-    {
-        cv_ptrRGB = cv_bridge::toCvShare(msgRGB);
-    }
-    catch (cv_bridge::Exception& e)
-    {
-        ROS_ERROR("cv_bridge exception: %s", e.what());
-        return;
-    }
+  // Copy the ros image message to cv::Mat.
+  cv_bridge::CvImageConstPtr cv_ptrRGB;
+  try
+  {
+      cv_ptrRGB = cv_bridge::toCvShare(msgRGB);
+  }
+  catch (cv_bridge::Exception& e)
+  {
+      ROS_ERROR("cv_bridge exception: %s", e.what());
+      return;
+  }
 
-    cv_bridge::CvImageConstPtr cv_ptrD;
-    try
-    {
-        cv_ptrD = cv_bridge::toCvShare(msgD);
-    }
-    catch (cv_bridge::Exception& e)
-    {
-        ROS_ERROR("cv_bridge exception: %s", e.what());
-        return;
-    }
+  cv_bridge::CvImageConstPtr cv_ptrD;
+  try
+  {
+      cv_ptrD = cv_bridge::toCvShare(msgD);
+  }
+  catch (cv_bridge::Exception& e)
+  {
+      ROS_ERROR("cv_bridge exception: %s", e.what());
+      return;
+  }
 
-    mpSLAM->TrackRGBD(cv_ptrRGB->image,cv_ptrD->image,cv_ptrRGB->header.stamp.toSec());
+  cv::Mat pose = mpSLAM->TrackRGBD(cv_ptrRGB->image,cv_ptrD->image,cv_ptrRGB->header.stamp.toSec());
+
+  if (pose.empty())
+    return;
+	
+	// transform into right handed camera frame
+   tf::Matrix3x3 rh_cameraPose( -pose.at<float>(0,0), pose.at<float>(0,1), pose.at<float>(0,2), -pose.at<float>(1,0), pose.at<float>(1,1), pose.at<float>(1,2), pose.at<float>(2,0), -pose.at<float>(2,1), -pose.at<float>(2,2));
+
+  tf::Vector3 rh_cameraTranslation( pose.at<float>(0,3), pose.at<float>(1,3), pose.at<float>(2,3) );
+
+  //rotate 270deg about z and 270deg about x
+  tf::Matrix3x3 rotation270degZX( 0, 0, 1,
+                                 -1, 0, 0,
+                                 0, -1, 0);
+
+  // tf::Matrix3x3 rotatePoseWorld(0, 0,-1,
+  //                                1, 0, 0,
+  //                                0,-1, 0);
+
+  tf::Matrix3x3 rotatePoseWorld( 0, 1,  0,
+                                 0, 0, -1,
+                                -1, 0,  0);
+
+  //publish right handed, x forward, y right, z down (NED)
+  static tf::TransformBroadcaster br;
+  tf::Transform transformCoordSystem = tf::Transform(rotation270degZX,tf::Vector3(0.0, 0.0, 0.0));
+
+  tf::Transform transformWorldSystem = tf::Transform(rotatePoseWorld,tf::Vector3(0.0, 0.0, 0.0));
+  br.sendTransform(tf::StampedTransform(transformCoordSystem, ros::Time::now(), "body", "camera_pose"));
+
+  tf::Transform transformCamera = tf::Transform(rh_cameraPose,rh_cameraTranslation);
+  br.sendTransform(tf::StampedTransform(transformCamera, ros::Time::now(), "camera_pose", "pose"));
+  br.sendTransform(tf::StampedTransform(transformWorldSystem, ros::Time::now(), "pose", "world"));
+
+  nav_msgs::Odometry odom;
+  odom.header.stamp = ros::Time::now();
+  odom.header.frame_id = "world";
+  odom.pose.pose.position.x = rh_cameraTranslation.getX();
+  odom.pose.pose.position.y = rh_cameraTranslation.getY();
+  odom.pose.pose.position.z = rh_cameraTranslation.getZ();
+  
+  Eigen::Matrix3f temp;
+  temp << - pose.at<float>(0,0),   pose.at<float>(0,1),   pose.at<float>(0,2),
+          - pose.at<float>(1,0),   pose.at<float>(1,1),   pose.at<float>(1,2),
+            pose.at<float>(2,0), - pose.at<float>(2,1), - pose.at<float>(2,2);
+
+  Eigen::Quaternionf q(temp);
+  odom.pose.pose.orientation.w = q.w();
+  odom.pose.pose.orientation.x = q.x();
+  odom.pose.pose.orientation.y = q.y();
+  odom.pose.pose.orientation.z = q.z();
+
+  odom_pub_.publish(odom);
+
 }
-
-
